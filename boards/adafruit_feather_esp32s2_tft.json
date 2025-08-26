@@ -1,7 +1,6 @@
 {
   "build": {
     "arduino": {
-      "ldscript": "esp32s2_out.ld",
       "partitions": "tinyuf2-partitions-4MB.csv",
       "memory_type": "qio_qspi"
     },
