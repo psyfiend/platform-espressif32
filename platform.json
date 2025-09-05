@@ -1,5 +1,5 @@
 {
-  "name": "espressif32",
+  "name": "espressif32-Psyki",
   "title": "Espressif 32",
   "description": "Espressif Systems is a privately held fabless semiconductor company. They provide wireless communications and Wi-Fi chips which are widely used in mobile devices and the Internet of Things applications.",
   "homepage": "https://espressif.com/",
@@ -16,7 +16,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/pioarduino/platform-espressif32.git"
+    "url": "https://github.com/psyfiend/platform-espressif32.git"
   },
   "version": "55.03.30",
   "frameworks": {
