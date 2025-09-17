@@ -19,7 +19,7 @@
     "arduino",
     "espidf"
   ],
-  "name": "ESP32C3 SuperMini",
+  "name": "ESP32-C3-Supermini",
   "upload": {
     "flash_size": "4MB",
     "maximum_ram_size": 327680,
