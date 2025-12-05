@@ -18,7 +18,7 @@
     "type": "git",
     "url": "https://github.com/psyfiend/platform-espressif32.git"
   },
-  "version": "55.03.30",
+  "version": "55.03.34",
   "frameworks": {
     "arduino": {
       "script": "builder/frameworks/arduino.py"
@@ -39,33 +39,33 @@
       "type": "framework",
       "optional": true,
       "owner": "espressif",
-      "version": "https://github.com/espressif/esp32-arduino-lib-builder/releases/download/idf-release_v5.5/esp32-arduino-libs-idf-release_v5.5-b66b5448-v1.zip"
+      "version": "https://github.com/espressif/arduino-esp32/releases/download/3.3.4/esp32-3.3.4-libs.tar.xz"
     },
     "framework-arduino-c2-skeleton-lib": {
       "type": "framework",
       "optional": true,
       "owner": "espressif",
-      "version": "https://github.com/pioarduino/platform-espressif32/releases/download/55.03.30-alpha1/c2_cbe9388f45_compile_skeleton.zip"
+      "version": "https://github.com/pioarduino/platform-espressif32/releases/download/c2-skeleton/c2_8410210c9a_compile_skeleton.zip"
     },
     "framework-espidf": {
       "type": "framework",
       "optional": true,
       "owner": "pioarduino",
-      "version": "https://github.com/pioarduino/esp-idf/releases/download/v5.5.0/esp-idf-v5.5.0.zip"
+      "version": "https://github.com/pioarduino/esp-idf/releases/download/v5.5.1.251106/esp-idf-v5.5.1.tar.xz"
     },
     "toolchain-xtensa-esp-elf": {
       "type": "toolchain",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "14.2.0+20241119",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/xtensa-esp-elf-14.2.0_20241119.zip"
+      "package-version": "14.2.0+20250730",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/xtensa-esp-elf-14.2.0_20250730.zip"
     },
     "toolchain-riscv32-esp": {
       "type": "toolchain",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "14.2.0+20241119",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/riscv32-esp-elf-14.2.0_20241119.zip"
+      "package-version": "14.2.0+20250730",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/riscv32-esp-elf-14.2.0_20250730.zip"
     },
     "toolchain-esp32ulp": {
       "type": "toolchain",
@@ -78,29 +78,29 @@
       "type": "debugger",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "16.2.0+20250324",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/xtensa-esp-gdb-v16.2_20250324.zip"
+      "package-version": "16.3.0+20250913",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/xtensa-esp-gdb-16.3_20250913.zip"
     },
     "tool-riscv32-esp-elf-gdb": {
       "type": "debugger",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "16.2.0+20250324",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/riscv32-esp-gdb-v16.2_20250324.zip"
+      "package-version": "16.3.0+20250913",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/riscv32-esp-gdb-16.3_20250913.zip"
     },
     "tool-esptoolpy": {
       "type": "uploader",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "5.0.2",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/esptoolpy-v5.0.2.zip"
+      "package-version": "5.1.0",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/esptoolpy-v5.1.0.zip"
     },
     "tool-esp_install": {
       "type": "tool",
       "optional": false,
       "owner": "pioarduino",
-      "package-version": "5.1.0",
-      "version": "https://github.com/pioarduino/esp_install/releases/download/v5.1.0/esp_install-v5.1.0.zip"
+      "package-version": "5.3.2",
+      "version": "https://github.com/pioarduino/esp_install/releases/download/v5.3.2/esp_install-v5.3.2.zip"
     },
     "contrib-piohome": {
       "optional": true,
@@ -175,8 +175,8 @@
       "type": "tool",
       "optional": true,
       "owner": "pioarduino",
-      "package-version": "3.30.2",
-      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/cmake-3.30.2.zip"
+      "package-version": "4.0.3",
+      "version": "https://github.com/pioarduino/registry/releases/download/0.0.1/cmake-4.0.3.zip"
     },
     "tool-esp-rom-elfs": {
       "type": "tool",

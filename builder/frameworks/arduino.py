@@ -22,10 +22,10 @@ kinds of creative coding, interactive objects, spaces or physical experiences.
 http://arduino.cc/en/Reference/HomePage
 """
 
-import os
-import sys
-import shutil
 import hashlib
+import os
+import shutil
+import sys
 import threading
 from contextlib import suppress
 from os.path import join, exists, isabs, splitdrive, commonpath, relpath
@@ -35,8 +35,7 @@ from typing import Union, List
 from SCons.Script import DefaultEnvironment, SConscript
 from platformio import fs
 from platformio.package.manager.tool import ToolPackageManager
-
-IS_WINDOWS = sys.platform.startswith("win")
+from platformio.compat import IS_WINDOWS
 
 # Constants for better performance
 UNICORE_FLAGS = {
@@ -73,7 +72,7 @@ def get_platform_default_threshold(mcu):
         "esp32": 32000,      # Standard ESP32
         "esp32s2": 32000,    # ESP32-S2
         "esp32s3": 32766,    # ESP32-S3
-        "esp32c3": 30000,    # ESP32-C3
+        "esp32c3": 32000,    # ESP32-C3
         "esp32c2": 32000,    # ESP32-C2
         "esp32c6": 31600,    # ESP32-C6
         "esp32h2": 32000,    # ESP32-H2
@@ -311,7 +310,7 @@ class PathCache:
     def sdk_dir(self):
         if self._sdk_dir is None:
             self._sdk_dir = fs.to_unix_path(
-                join(self.framework_lib_dir, self.mcu, "include")
+                str(Path(self.framework_lib_dir) / self.mcu / "include")
             )
         return self._sdk_dir
 
@@ -507,7 +506,7 @@ def safe_remove_sdkconfig_files():
     envs = [section.replace("env:", "") for section in config.sections()
             if section.startswith("env:")]
     for env_name in envs:
-        file_path = join(project_dir, f"sdkconfig.{env_name}")
+        file_path = str(Path(project_dir) / f"sdkconfig.{env_name}")
         if exists(file_path):
             safe_delete_file(file_path)
 
@@ -566,9 +565,8 @@ FRAMEWORK_LIB_DIR = path_cache.framework_lib_dir
 
 SConscript("_embed_files.py", exports="env")
 
-flag_any_custom_sdkconfig = exists(join(
-    platform.get_package_dir("framework-arduinoespressif32-libs"),
-    "sdkconfig"))
+flag_any_custom_sdkconfig = (FRAMEWORK_LIB_DIR is not None and 
+                            exists(str(Path(FRAMEWORK_LIB_DIR) / "sdkconfig")))
 
 
 def has_unicore_flags():
@@ -577,13 +575,29 @@ def has_unicore_flags():
                or flag in board_sdkconfig for flag in UNICORE_FLAGS)
 
 
-# Esp32-solo1 libs settings
-if flag_custom_sdkconfig and has_unicore_flags():
+def has_psram_config():
+    """Check if PSRAM is configured in extra_flags, entry_custom_sdkconfig or board_sdkconfig"""
+    return ("PSRAM" in extra_flags or "PSRAM" in entry_custom_sdkconfig
+            or "PSRAM" in board_sdkconfig or "CONFIG_SPIRAM=y" in extra_flags
+            or "CONFIG_SPIRAM=y" in entry_custom_sdkconfig
+            or "CONFIG_SPIRAM=y" in board_sdkconfig)
+
+
+# Esp32 settings for solo1 and PSRAM
+if flag_custom_sdkconfig:
     if not env.get('BUILD_UNFLAGS'):  # Initialize if not set
         env['BUILD_UNFLAGS'] = []
 
-    build_unflags = (" ".join(env['BUILD_UNFLAGS']) +
-                     " -mdisable-hardware-atomics -ustart_app_other_cores")
+    build_unflags = " ".join(env['BUILD_UNFLAGS'])
+
+    # -mdisable-hardware-atomics: always for solo1, or when PSRAM is NOT configured
+    if has_unicore_flags() or not has_psram_config():
+        build_unflags += " -mdisable-hardware-atomics"
+
+    # -ustart_app_other_cores only and always for solo1
+    if has_unicore_flags():
+        build_unflags += " -ustart_app_other_cores"
+
     new_build_unflags = build_unflags.split()
     env.Replace(BUILD_UNFLAGS=new_build_unflags)
 
@@ -599,7 +613,7 @@ def matching_custom_sdkconfig():
     if not flag_any_custom_sdkconfig:
         return True, cust_sdk_is_present
 
-    last_sdkconfig_path = join(project_dir, "sdkconfig.defaults")
+    last_sdkconfig_path = str(Path(project_dir) / "sdkconfig.defaults")
     if not exists(last_sdkconfig_path):
         return False, cust_sdk_is_present
 
@@ -647,6 +661,8 @@ IS_INTEGRATION_DUMP = env.IsIntegrationDump()
 def is_framework_subfolder(potential_subfolder):
     """Check if a path is a subfolder of the framework SDK directory"""
     # carefully check before change this function
+    if FRAMEWORK_SDK_DIR is None:
+        return False
     if not isabs(potential_subfolder):
         return False
     if (splitdrive(FRAMEWORK_SDK_DIR)[0] !=
@@ -889,7 +905,7 @@ if check_reinstall_frwrk():
 if flag_custom_sdkconfig and not flag_any_custom_sdkconfig:
     call_compile_libs()
 
-# Main logic for Arduino Framework
+# Arduino framework configuration and build logic
 pioframework = env.subst("$PIOFRAMEWORK")
 arduino_lib_compile_flag = env.subst("$ARDUINO_LIB_COMPILE_FLAG")
 
@@ -901,12 +917,12 @@ if ("arduino" in pioframework and "espidf" not in pioframework and
     component_manager = ComponentManager(env)
     component_manager.handle_component_settings()
     silent_action = env.Action(component_manager.restore_pioarduino_build_py)
-    # hack to silence scons command output
+    # silence scons command output
     silent_action.strfunction = lambda target, source, env: ''
     env.AddPostAction("checkprogsize", silent_action)
 
     if IS_WINDOWS:
         env.AddBuildMiddleware(smart_include_length_shorten)
 
-    build_script_path = join(FRAMEWORK_DIR, "tools", "pioarduino-build.py")
+    build_script_path = str(Path(FRAMEWORK_DIR) / "tools" / "pioarduino-build.py")
     SConscript(build_script_path)
