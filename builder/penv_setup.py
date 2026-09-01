@@ -14,8 +14,8 @@
 
 import json
 import os
-import re
 import semantic_version
+import shutil
 import site
 import socket
 import subprocess
@@ -25,6 +25,11 @@ from urllib.parse import urlparse
 
 from platformio.package.version import pepver_to_semver
 from platformio.compat import IS_WINDOWS
+
+GDB_TOOL_PACKAGES = {
+    "xtensa": "tool-xtensa-esp-elf-gdb",
+    "riscv": "tool-riscv32-esp-elf-gdb",
+}
 
 # Check Python version requirement
 if sys.version_info < (3, 10):
@@ -37,33 +42,31 @@ if sys.version_info < (3, 10):
 
 github_actions = bool(os.getenv("GITHUB_ACTIONS"))
 
-PLATFORMIO_URL_VERSION_RE = re.compile(
-    r'/v?(\d+\.\d+\.\d+(?:[.-]\w+)?(?:\.\d+)?)(?:\.(?:zip|tar\.gz|tar\.bz2))?$',
-    re.IGNORECASE,
-)
-
 # Python dependencies required for ESP32 platform builds
 python_deps = {
-    "platformio": "https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.18.zip",
+    "pioarduino": ">=6.1.19",
+    "littlefs-python": ">=0.16.0",
+    "fatfs-ng": ">=0.1.14",
     "pyyaml": ">=6.0.2",
     "rich-click": ">=1.8.6",
     "zopfli": ">=0.2.2",
     "intelhex": ">=2.3.0",
     "rich": ">=14.0.0",
-    "urllib3": "<2",
     "cryptography": ">=45.0.3",
     "certifi": ">=2025.8.3",
     "ecdsa": ">=0.19.1",
     "bitstring": ">=4.3.1",
     "reedsolo": ">=1.5.3,<1.8",
     "esp-idf-size": ">=2.0.0",
-    "esp-coredump": ">=1.14.0"
+    "esp-coredump": ">=1.14.0",
+    "pyelftools": ">=0.32"
 }
 
 
 def has_internet_connection(timeout=5):
     """
     Checks practical internet reachability for dependency installation.
+    Can be overridden by setting PLATFORMIO_OFFLINE=1 environment variable.
     1) If HTTPS/HTTP proxy environment variable is set, test TCP connectivity to the proxy endpoint.
     2) Otherwise, test direct TCP connectivity to common HTTPS endpoints (port 443).
     
@@ -73,6 +76,10 @@ def has_internet_connection(timeout=5):
     Returns:
         True if at least one path appears reachable; otherwise False.
     """
+    # Check if offline mode is forced via environment variable
+    if os.getenv("PLATFORMIO_OFFLINE", "").strip().lower() in ("1", "true", "yes"):
+        return False
+
     # 1) Test TCP connectivity to the proxy endpoint.
     proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
     if proxy:
@@ -101,6 +108,9 @@ def has_internet_connection(timeout=5):
     return False
 
 
+has_network = has_internet_connection() or github_actions
+
+
 def get_executable_path(penv_dir, executable_name):
     """
     Get the path to an executable based on the penv_dir.
@@ -111,14 +121,123 @@ def get_executable_path(penv_dir, executable_name):
     return str(Path(penv_dir) / scripts_dir / f"{executable_name}{exe_suffix}")
 
 
+def _get_penv_python_version(penv_dir):
+    """
+    Detect the Python version used to create an existing penv.
+
+    Reads the ``version`` key from ``pyvenv.cfg`` which is always
+    written by both ``python -m venv`` and ``uv venv``.  This avoids
+    spawning a subprocess (which can fail when the penv Python is
+    corrupted) and works identically on all platforms.
+
+    Falls back to inspecting ``lib/pythonX.Y/`` directories on POSIX
+    if ``pyvenv.cfg`` is missing or unparseable.
+
+    Returns:
+        tuple[int, int] | None: (major, minor) of the penv Python, or
+        None if the penv does not exist or its version cannot be
+        determined.
+    """
+    penv_path = Path(penv_dir)
+
+    # Primary: parse pyvenv.cfg (cross-platform, no subprocess)
+    cfg_file = penv_path / "pyvenv.cfg"
+    if cfg_file.is_file():
+        try:
+            for line in cfg_file.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "version":
+                    parts = value.strip().split(".")
+                    if len(parts) >= 2:
+                        return (int(parts[0]), int(parts[1]))
+        except Exception:
+            pass
+
+    # Fallback (POSIX only): inspect lib/pythonX.Y/ directories
+    if not IS_WINDOWS:
+        lib_dir = penv_path / "lib"
+        if lib_dir.is_dir():
+            for entry in sorted(lib_dir.iterdir(), reverse=True):
+                if entry.is_dir() and entry.name.startswith("python") and (entry / "site-packages").is_dir():
+                    ver_str = entry.name[len("python"):]
+                    try:
+                        major, minor = ver_str.split(".")
+                        return (int(major), int(minor))
+                    except (ValueError, TypeError):
+                        continue
+
+    return None
+
+
+def _penv_version_matches(penv_dir):
+    """
+    Check whether the existing penv was created with the same Python
+    major.minor version as the currently running interpreter.
+
+    Returns True if versions match or if the penv does not exist yet.
+    """
+    penv_ver = _get_penv_python_version(penv_dir)
+    if penv_ver is None:
+        return True  # no penv yet — nothing to mismatch
+    return penv_ver == (sys.version_info.major, sys.version_info.minor)
+
+
+def _get_penv_site_packages(penv_dir):
+    """
+    Locate the actual site-packages directory inside a penv.
+
+    Instead of constructing the path from ``sys.version_info`` (which
+    reflects the *host* interpreter and may differ from the penv's
+    Python version), this function inspects the penv's directory
+    structure and returns the first valid site-packages path found.
+
+    Returns:
+        str | None: Absolute path to the site-packages directory, or
+        None if it cannot be found.
+    """
+    penv_path = Path(penv_dir)
+
+    # Windows: Lib/site-packages (no version directory)
+    if IS_WINDOWS:
+        sp = penv_path / "Lib" / "site-packages"
+        if sp.is_dir():
+            return str(sp)
+        return None
+
+    # POSIX: lib/pythonX.Y/site-packages
+    lib_dir = penv_path / "lib"
+    if not lib_dir.is_dir():
+        return None
+    # Prefer the newest python version directory
+    for entry in sorted(lib_dir.iterdir(), key=lambda e: tuple(int(x) for x in e.name[6:].split('.') if x.isdigit()), reverse=True):
+        if entry.is_dir() and entry.name.startswith("python"):
+            sp = entry / "site-packages"
+            if sp.is_dir():
+                return str(sp)
+    return None
+
+
 def setup_pipenv_in_package(env, penv_dir):
     """
     Checks if 'penv' folder exists in platformio dir and creates virtual environment if not.
+    Recreates the penv if the Python version does not match the running interpreter.
     First tries to create with uv, falls back to python -m venv if uv is not available.
     
     Returns:
         str or None: Path to uv executable if uv was used, None if python -m venv was used
     """
+    # Recreate penv when Python version changed (e.g. Homebrew upgraded 3.13→3.14)
+    penv_python_path = get_executable_path(penv_dir, "python")
+    if os.path.isfile(penv_python_path) and not _penv_version_matches(penv_dir):
+        penv_ver = _get_penv_python_version(penv_dir)
+        current_ver = (sys.version_info.major, sys.version_info.minor)
+        print(
+            f"Python version mismatch: penv has {penv_ver[0]}.{penv_ver[1]}, "
+            f"current interpreter is {current_ver[0]}.{current_ver[1]}. "
+            f"Recreating penv..."
+        )
+        shutil.rmtree(penv_dir, ignore_errors=True)
+
     if not os.path.isfile(get_executable_path(penv_dir, "python")):
         # Attempt virtual environment creation using uv package manager
         uv_success = False
@@ -172,27 +291,50 @@ def setup_pipenv_in_package(env, penv_dir):
 
 
 def setup_python_paths(penv_dir):
-    """Setup Python module search paths using the penv_dir."""    
-    # Add site-packages directory
-    python_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    site_packages = (
-        str(Path(penv_dir) / "Lib" / "site-packages") if IS_WINDOWS
-        else str(Path(penv_dir) / "lib" / python_ver / "site-packages")
-    )
-    
-    if os.path.isdir(site_packages):
-        site.addsitedir(site_packages)
+    """Setup Python module search paths using the penv_dir.
+
+    Dynamically locates the penv's site-packages directory instead of
+    deriving it from ``sys.version_info``, which reflects the *host*
+    interpreter and may differ from the Python version used to create
+    the penv.  The penv's site-packages is inserted at the front of
+    ``sys.path`` and conflicting system site-packages entries are
+    removed so that packages installed in the penv always take
+    precedence.
+    """
+    site_packages = _get_penv_site_packages(penv_dir)
+    if not site_packages:
+        return
+
+    penv_dir_resolved = os.path.realpath(penv_dir) + os.sep
+
+    # Remove system site-packages entries that are not part of the penv
+    sys.path[:] = [
+        p for p in sys.path
+        if "site-packages" not in p.lower()
+        or os.path.realpath(p).startswith(penv_dir_resolved)
+    ]
+
+    # Add penv site-packages at the beginning
+    if site_packages not in sys.path:
+        sys.path.insert(0, site_packages)
+
+    site.addsitedir(site_packages)
+    # Re-ensure penv is still first after addsitedir may have appended it
+    if sys.path[0] != site_packages:
+        sys.path.remove(site_packages)
+        sys.path.insert(0, site_packages)
 
 
 def get_packages_to_install(deps, installed_packages):
     """
     Generator for Python packages that need to be installed.
     Compares package names case-insensitively.
-    
+    Handles both semantic version specs and direct URLs (git+, http, etc.).
+
     Args:
         deps (dict): Dictionary of package names and version specifications
         installed_packages (dict): Dictionary of currently installed packages (keys should be lowercase)
-        
+
     Yields:
         str: Package name that needs to be installed
     """
@@ -200,37 +342,39 @@ def get_packages_to_install(deps, installed_packages):
         name = package.lower()
         if name not in installed_packages:
             yield package
-        elif name == "platformio":
-            # Enforce the version from the direct URL if it looks like one.
-            # If version can't be parsed, fall back to accepting any installed version.
-            m = PLATFORMIO_URL_VERSION_RE.search(spec)
-            if m:
-                expected_ver = pepver_to_semver(m.group(1))
-                if installed_packages.get(name) != expected_ver:
-                    # Reinstall to align with the pinned URL version
-                    yield package
-            else:
-                continue
+        elif spec.startswith(('http://', 'https://', 'git+', 'file://')):
+            # URL/git/file specs cannot be parsed by semantic_version.SimpleSpec.
+            # Treat the pinned URL as already satisfied if present in the env;
+            # use `uv pip install --upgrade` separately to refresh on demand.
+            continue
         else:
             version_spec = semantic_version.SimpleSpec(spec)
             if not version_spec.match(installed_packages[name]):
                 yield package
 
 
-def install_python_deps(python_exe, external_uv_executable):
+def install_python_deps(python_exe, external_uv_executable, uv_cache_dir=None, additional_deps=None):
     """
     Ensure uv package manager is available in penv and install required Python dependencies.
-    
+
     Args:
         python_exe: Path to Python executable in the penv
         external_uv_executable: Path to external uv executable used to create the penv (can be None)
-    
+        uv_cache_dir: Optional path to uv cache directory
+        additional_deps: Optional dictionary of additional package names and version specs to install
+
     Returns:
         bool: True if successful, False otherwise
     """
     # Get the penv directory to locate uv within it
     penv_dir = os.path.dirname(os.path.dirname(python_exe))
     penv_uv_executable = get_executable_path(penv_dir, "uv")
+
+    # Build subprocess environment with UV_CACHE_DIR if specified
+    uv_env = None
+    if uv_cache_dir:
+        uv_env = dict(os.environ)
+        uv_env["UV_CACHE_DIR"] = str(uv_cache_dir)
     
     # Check if uv is available in the penv
     uv_in_penv_available = False
@@ -248,31 +392,32 @@ def install_python_deps(python_exe, external_uv_executable):
     # Install uv into penv if not available
     if not uv_in_penv_available:
         if external_uv_executable:
-            # Use external uv to install uv into the penv
+            # Try external uv first to install uv into the penv
             try:
                 subprocess.check_call(
                     [external_uv_executable, "pip", "install", "uv>=0.1.0", f"--python={python_exe}", "--quiet"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.STDOUT,
-                    timeout=300
+                    timeout=300,
+                    env=uv_env
                 )
-            except subprocess.CalledProcessError as e:
-                print(f"Error: uv installation failed with exit code {e.returncode}")
-                return False
-            except subprocess.TimeoutExpired:
-                print("Error: uv installation timed out")
-                return False
-            except FileNotFoundError:
-                print("Error: External uv executable not found")
-                return False
-            except Exception as e:
-                print(f"Error installing uv package manager into penv: {e}")
-                return False
-        else:
-            # No external uv available, use pip to install uv into penv
+                uv_in_penv_available = True
+            except Exception:
+                print("Warning: uv installation via external uv failed, falling back to pip")
+
+        if not uv_in_penv_available:
+            # Fallback to pip to install uv into penv
+            # uv-created venvs don't include pip, so ensure it's available first
+            try:
+                subprocess.run(
+                    [python_exe, "-m", "ensurepip", "--default-pip"],
+                    capture_output=True, timeout=60
+                )
+            except Exception:
+                pass
             try:
                 subprocess.check_call(
-                    [python_exe, "-m", "pip", "install", "uv>=0.1.0", "--quiet"],
+                    [python_exe, "-m", "pip", "install", "uv>=0.1.0", "--quiet", "--no-cache-dir"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.STDOUT,
                     timeout=300
@@ -306,7 +451,8 @@ def install_python_deps(python_exe, external_uv_executable):
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
-                timeout=300
+                timeout=300,
+                env=uv_env
             )
             
             if result_obj.returncode == 0:
@@ -332,31 +478,38 @@ def install_python_deps(python_exe, external_uv_executable):
         return result
 
     installed_packages = _get_installed_uv_packages()
-    packages_to_install = list(get_packages_to_install(python_deps, installed_packages))
-    
+
+    # Combine core and additional dependencies
+    all_deps = dict(python_deps)
+    if additional_deps:
+        all_deps.update(additional_deps)
+
+    packages_to_install = list(get_packages_to_install(all_deps, installed_packages))
+
     if packages_to_install:
         packages_list = []
         for p in packages_to_install:
-            spec = python_deps[p]
+            spec = all_deps[p]
             if spec.startswith(('http://', 'https://', 'git+', 'file://')):
                 packages_list.append(spec)
             else:
                 packages_list.append(f"{p}{spec}")
-        
+
         cmd = [
             penv_uv_executable, "pip", "install",
             f"--python={python_exe}",
             "--quiet", "--upgrade"
         ] + packages_list
-        
+
         try:
             subprocess.check_call(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
-                timeout=300
+                timeout=300,
+                env=uv_env
             )
-                
+
         except subprocess.CalledProcessError as e:
             print(f"Error: Failed to install Python dependencies (exit code: {e.returncode})")
             return False
@@ -369,11 +522,11 @@ def install_python_deps(python_exe, external_uv_executable):
         except Exception as e:
             print(f"Error installing Python dependencies: {e}")
             return False
-    
+
     return True
 
 
-def install_esptool(env, platform, python_exe, uv_executable):
+def install_esptool(env, platform, python_exe, uv_executable, uv_cache_dir=None):
     """
     Install esptool from package folder "tool-esptoolpy" using uv package manager.
     Ensures esptool is installed from the specific tool-esptoolpy package directory.
@@ -383,6 +536,7 @@ def install_esptool(env, platform, python_exe, uv_executable):
         platform: PlatformIO platform object  
         python_exe (str): Path to Python executable in virtual environment
         uv_executable (str): Path to uv executable
+        uv_cache_dir: Optional path to uv cache directory
     
     Raises:
         SystemExit: If esptool installation fails or package directory not found
@@ -393,6 +547,12 @@ def install_esptool(env, platform, python_exe, uv_executable):
             f"Error: 'tool-esptoolpy' package directory not found: {esptool_repo_path!r}\n"
         )
         sys.exit(1)
+
+    # Build subprocess environment with UV_CACHE_DIR if specified
+    uv_env = None
+    if uv_cache_dir:
+        uv_env = dict(os.environ)
+        uv_env["UV_CACHE_DIR"] = str(uv_cache_dir)
 
     # Check if esptool is already installed from the correct path
     try:
@@ -425,7 +585,7 @@ def install_esptool(env, platform, python_exe, uv_executable):
             uv_executable, "pip", "install", "--quiet", "--force-reinstall",
             f"--python={python_exe}",
             "-e", esptool_repo_path
-        ], timeout=60)
+        ], timeout=60, env=uv_env)
 
     except subprocess.CalledProcessError as e:
         sys.stderr.write(
@@ -466,6 +626,9 @@ def _setup_python_environment_core(env, platform, platformio_dir, should_install
         tuple[str, str]: (Path to penv Python executable, Path to esptool script)
     """
     penv_dir = str(Path(platformio_dir) / "penv")
+
+    # Determine uv cache directory inside .platformio/.cache
+    uv_cache_dir = str(Path(platformio_dir) / ".cache" / "uv")
     
     # Create virtual environment if not present
     if env is not None:
@@ -495,8 +658,8 @@ def _setup_python_environment_core(env, platform, platformio_dir, should_install
     uv_executable = get_executable_path(penv_dir, "uv")
 
     # Install required Python dependencies for ESP32 platform
-    if has_internet_connection() or github_actions:
-        if not install_python_deps(penv_python, used_uv_executable):
+    if has_network:
+        if not install_python_deps(penv_python, used_uv_executable, uv_cache_dir):
             sys.stderr.write("Error: Failed to install Python dependencies into penv\n")
             sys.exit(1)
     else:
@@ -506,10 +669,10 @@ def _setup_python_environment_core(env, platform, platformio_dir, should_install
     if should_install_esptool:
         if env is not None:
             # SCons version
-            install_esptool(env, platform, penv_python, uv_executable)
+            install_esptool(env, platform, penv_python, uv_executable, uv_cache_dir)
         else:
             # Minimal setup - install esptool from tool package
-            _install_esptool_from_tl_install(platform, penv_python, uv_executable)
+            _install_esptool_from_tl_install(platform, penv_python, uv_executable, uv_cache_dir)
 
     # Setup certifi environment variables
     _setup_certifi_env(env, penv_python)
@@ -520,6 +683,7 @@ def _setup_python_environment_core(env, platform, platformio_dir, should_install
 def _setup_pipenv_minimal(penv_dir):
     """
     Setup virtual environment without SCons dependencies.
+    Recreates the penv if the Python version does not match the running interpreter.
     
     Args:
         penv_dir (str): Path to virtual environment directory
@@ -527,6 +691,18 @@ def _setup_pipenv_minimal(penv_dir):
     Returns:
         str or None: Path to uv executable if uv was used, None if python -m venv was used
     """
+    # Recreate penv when Python version changed (e.g. Homebrew upgraded 3.13→3.14)
+    penv_python_path = get_executable_path(penv_dir, "python")
+    if os.path.isfile(penv_python_path) and not _penv_version_matches(penv_dir):
+        penv_ver = _get_penv_python_version(penv_dir)
+        current_ver = (sys.version_info.major, sys.version_info.minor)
+        print(
+            f"Python version mismatch: penv has {penv_ver[0]}.{penv_ver[1]}, "
+            f"current interpreter is {current_ver[0]}.{current_ver[1]}. "
+            f"Recreating penv..."
+        )
+        shutil.rmtree(penv_dir, ignore_errors=True)
+
     if not os.path.isfile(get_executable_path(penv_dir, "python")):
         # Attempt virtual environment creation using uv package manager
         uv_success = False
@@ -580,7 +756,7 @@ def _setup_pipenv_minimal(penv_dir):
     return None
 
 
-def _install_esptool_from_tl_install(platform, python_exe, uv_executable):
+def _install_esptool_from_tl_install(platform, python_exe, uv_executable, uv_cache_dir=None):
     """
     Install esptool from tl-install provided path into penv.
     
@@ -588,6 +764,7 @@ def _install_esptool_from_tl_install(platform, python_exe, uv_executable):
         platform: PlatformIO platform object  
         python_exe (str): Path to Python executable in virtual environment
         uv_executable (str): Path to uv executable
+        uv_cache_dir: Optional path to uv cache directory
     
     Raises:
         SystemExit: If esptool installation fails or package directory not found
@@ -596,6 +773,12 @@ def _install_esptool_from_tl_install(platform, python_exe, uv_executable):
     esptool_repo_path = platform.get_package_dir("tool-esptoolpy") or ""
     if not esptool_repo_path or not os.path.isdir(esptool_repo_path):
         return (None, None)
+
+    # Build subprocess environment with UV_CACHE_DIR if specified
+    uv_env = None
+    if uv_cache_dir:
+        uv_env = dict(os.environ)
+        uv_env["UV_CACHE_DIR"] = str(uv_cache_dir)
 
     # Check if esptool is already installed from the correct path
     try:
@@ -628,12 +811,85 @@ def _install_esptool_from_tl_install(platform, python_exe, uv_executable):
             uv_executable, "pip", "install", "--quiet", "--force-reinstall",
             f"--python={python_exe}",
             "-e", esptool_repo_path
-        ], timeout=60)
+        ], timeout=60, env=uv_env)
         print(f"Installed esptool from tl-install path: {esptool_repo_path}")
 
     except subprocess.CalledProcessError as e:
         print(f"Warning: Failed to install esptool from {esptool_repo_path} (exit {e.returncode})")
         # Don't exit - esptool installation is not critical for penv setup
+
+
+def install_pio_lock(platform, uv_executable, penv_executable, uv_cache_dir=None):
+    """
+    Install pio-lock into the platform's Python virtual environment.
+
+    pio-lock provides dependency lockfile functionality for PlatformIO,
+    enabling reproducible builds for embedded projects.
+
+    Args:
+        platform: PlatformIO platform object
+        uv_executable (str): Path to uv executable
+        penv_executable (str): Path to penv Python executable
+        uv_cache_dir: Optional path to uv cache directory
+    """
+    if not has_network:
+        return
+
+    # Define pio-lock as additional dependency
+    # todo: Replace with official pio-lock package when available
+    # For now, use the git source from m-mcgowan without version and install check
+    pio_lock_dep = {
+        "pio-lock": "git+https://github.com/m-mcgowan/pio-lock.git@v0.2.0"
+    }
+
+    # Use the centralized installer
+    if not install_python_deps(penv_executable, uv_executable, uv_cache_dir, pio_lock_dep):
+        print("Warning: Failed to install pio-lock")
+
+
+def install_freertos_gdb(platform, uv_executable, penv_executable, uv_cache_dir=None):
+    """
+    Install freertos-gdb into each GDB tool's embedded Python site (share/gdb/python/).
+
+    Iterates over all GDB tool packages known to the platform and installs
+    the freertos-gdb PyPI package via uv if not already present.
+
+    Args:
+        platform: PlatformIO platform object
+        uv_executable (str): Path to uv executable
+        penv_executable (str): Path to penv Python executable
+        uv_cache_dir: Optional path to uv cache directory
+    """
+    if not has_network:
+        return
+        
+    uv_env = None
+    if uv_cache_dir:
+        uv_env = dict(os.environ)
+        uv_env["UV_CACHE_DIR"] = str(uv_cache_dir)
+
+    for tool_pkg in GDB_TOOL_PACKAGES.values():
+        pkg_dir = platform.get_package_dir(tool_pkg)
+        if not pkg_dir or not Path(pkg_dir).is_dir():
+            continue
+        target_dir = Path(pkg_dir, "share", "gdb", "python")
+        if Path(target_dir, "freertos_gdb").is_dir():
+            continue
+        try:
+            subprocess.check_call([
+                uv_executable, "pip", "install", "--quiet",
+                f"--python={penv_executable}",
+                "--target", str(target_dir),
+                "freertos-gdb"
+            ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+                timeout=60,
+                env=uv_env,
+            )
+            print(f"Installed freertos-gdb into {target_dir}")
+        except Exception as exc:
+            print(f"Warning: Failed to install freertos-gdb into {target_dir}: {exc}")
 
 
 def _setup_certifi_env(env, python_exe):

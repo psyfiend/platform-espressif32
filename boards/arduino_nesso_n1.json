@@ -1,21 +1,15 @@
 {
   "build": {
     "core": "esp32",
-      "extra_flags": [
-      "-DARDUINO_USB_MODE=1",
-      "-DARDUINO_USB_CDC_ON_BOOT=1"
-    ],
     "f_cpu": "160000000L",
     "f_flash": "80000000L",
     "flash_mode": "qio",
     "mcu": "esp32c6",
-    "variant": "esp32c6-supermini"
+    "variant": "arduino_nesso_n1"
   },
   "connectivity": [
-    "wifi",
     "bluetooth",
-    "zigbee",
-    "thread"
+    "wifi"
   ],
   "debug": {
     "openocd_target": "esp32c6.cfg"
@@ -24,14 +18,14 @@
     "arduino",
     "espidf"
   ],
-  "name": "ESP32-C6-Supermini",
+  "name": "Arduino Nesso-N1",
   "upload": {
-    "flash_size": "4MB",
+    "flash_size": "16MB",
     "maximum_ram_size": 327680,
-    "maximum_size": 4194304,
+    "maximum_size": 16777216,
     "require_upload_port": true,
     "speed": 460800
   },
-  "url": "https://www.espboards.dev/esp32/esp32-c6-super-mini/",
-  "vendor": "Aliexpress"
+  "url": "https://store.arduino.cc/products/nesso-n1",
+  "vendor": "Arduino"
 }
